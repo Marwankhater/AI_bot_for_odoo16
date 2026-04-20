@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="res_config_settings_view_ai_bot" model="ir.ui.view">
+        <field name="name">res.config.settings.view.ai.bot</field>
+        <field name="model">res.config.settings</field>
+        <field name="inherit_id" ref="base_setup.res_config_settings_view_form"/>
+        <field name="arch" type="xml">
+            <form position="inside">
+                <div class="app_settings_block" data-string="AI Bot (Gemini)" string="AI Bot (Gemini)" data-key="ai_bot_gemini">
+                    <h2>🤖 AI Bot - Google Gemini</h2>
+                    <div class="row mt16 o_settings_container">
+                        <div class="col-12 col-lg-6 o_setting_box">
+                            <div class="o_setting_right_pane">
+                                <label for="ai_bot_gemini_api_key" string="Gemini API Key"/>
+                                <div class="text-muted">
+                                    احصل على مفتاحك المجاني من aistudio.google.com
+                                </div>
+                                <div class="content-group mt8">
+                                    <field name="ai_bot_gemini_api_key" password="True" placeholder="AIza..."/>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </form>
+        </field>
+    </record>
+</odoo>

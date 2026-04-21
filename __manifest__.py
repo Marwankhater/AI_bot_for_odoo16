@@ -2,7 +2,7 @@
     'name': 'AI Bot - Gemini (Discuss)',
     'version': '16.0.1.0.0',
     'category': 'Discuss',
-    'summary': 'بوت ذكي في Discuss مدعوم بـ Google Gemini',
+    'summary': 'Make odoo bot smart agent for odoo16',
     'author': 'Custom',
     'depends': ['mail', 'sale_management', 'purchase'],
     'data': [

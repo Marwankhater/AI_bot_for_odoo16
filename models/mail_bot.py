@@ -66,7 +66,7 @@ class MailBot(models.AbstractModel):
     _inherit = 'mail.bot'
 
     def _get_answer(self, record, message, values, command):
-        api_key = "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"
+        api_key = "ADD UR KEYYY "
 
         if not api_key or not message:
             return super()._get_answer(record, message, values, command)

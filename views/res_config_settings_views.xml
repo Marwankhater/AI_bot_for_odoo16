@@ -6,17 +6,17 @@
         <field name="inherit_id" ref="base_setup.res_config_settings_view_form"/>
         <field name="arch" type="xml">
             <form position="inside">
-                <div class="app_settings_block" data-string="AI Bot (Gemini)" string="AI Bot (Gemini)" data-key="ai_bot_gemini">
-                    <h2>🤖 AI Bot - Google Gemini</h2>
+                <div class="app_settings_block" data-string="AI Bot (Groq)" string="AI Bot (Groq)" data-key="ai_bot_groq">
+                    <h2>🤖 AI Bot - Groq (LLaMA 3.3 70B)</h2>
                     <div class="row mt16 o_settings_container">
                         <div class="col-12 col-lg-6 o_setting_box">
                             <div class="o_setting_right_pane">
-                                <label for="ai_bot_gemini_api_key" string="Gemini API Key"/>
+                                <label for="ai_bot_groq_api_key" string="Groq API Key"/>
                                 <div class="text-muted">
-                                    احصل على مفتاحك المجاني من aistudio.google.com
+                                    احصل على مفتاحك المجاني من console.groq.com
                                 </div>
                                 <div class="content-group mt8">
-                                    <field name="ai_bot_gemini_api_key" password="True" placeholder="AIza..."/>
+                                    <field name="ai_bot_groq_api_key" password="True" placeholder="gsk_..."/>
                                 </div>
                             </div>
                         </div>

@@ -1,4 +1,12 @@
-# 🤖 OdooBot AI — Turning Your ERP Into a Conversational Assistant
+<p align="center">
+  <img src="docs/cover.png" alt="OdooBot AI" width="100%">
+</p>
+
+# OdooBot AI
+
+An Odoo 16 module that swaps the default OdooBot in Discuss for an LLM (LLaMA 3.3 70B on Groq).
+You message it the way you'd message a coworker, and it creates or updates records for you:
+authors, books, quotations, purchase orders and customers.
 
 <div align="center">
 
@@ -8,76 +16,43 @@
 ![Groq](https://img.shields.io/badge/Groq-Free%20Tier-orange?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-LGPL--3-brightgreen?style=for-the-badge)
 
-**What if you could manage your entire ERP just by having a conversation?**
-
-*No menus. No forms. Just talk.*
-
 </div>
 
----
+<!-- TODO: add a short demo gif (docs/demo.gif) -->
 
-## The Problem
+## Why I built it
 
-Odoo is powerful — but navigating menus, filling forms, and switching between modules takes time. The built-in OdooBot is little more than a scripted FAQ bot with fixed responses. It doesn't understand natural language, doesn't take actions, and definitely doesn't speak Arabic.
+The built-in OdooBot is basically a scripted FAQ. It can't understand a normal sentence and it
+can't do anything inside the system. I wanted to see how far you get if a model reads the
+conversation, works out what the user wants, and hands a structured action to the Odoo ORM,
+with a confirmation step so nothing gets written by accident.
 
-We asked: **what if the system understood us, instead of us learning the system's language?**
+## How it works
 
----
-
-## What We Built
-
-We replaced OdooBot's static brain with a real Large Language Model — **LLaMA 3.3 70B** running on Groq's free inference API. The result is an AI assistant that lives inside Odoo's **Discuss** chat and can actually *do things* in your system just from a conversation.
-
-No new UI. No new apps. Just talk to OdooBot like you'd talk to a colleague.
-
----
-
-## How It Works
-
-```
-User types in Discuss
-        ↓
-Module intercepts the message
-        ↓
-Last 14 messages sent as context to Groq API (LLaMA 3.3 70B)
-        ↓
-AI returns structured JSON action
-        ↓
-Module validates all required fields
-        ↓
-Shows confirmation with totals → User confirms
-        ↓
-Executes on Odoo ORM → Replies in chat
+```mermaid
+flowchart LR
+    A["User message<br/>in Discuss"] --> B["mail.bot override"]
+    B --> C["Groq · LLaMA 3.3 70B<br/>+ last 14 messages"]
+    C --> D["JSON action"]
+    D --> E{"Required fields<br/>present?"}
+    E -- no --> F["Bot asks for<br/>what's missing"]
+    F --> A
+    E -- yes --> G["Summary with totals"]
+    G -- user confirms --> H["ORM write<br/>(savepoint)"]
+    H --> I["Reply in chat"]
 ```
 
----
+The parts that took the most work:
 
-## What Makes It Different
+- The last 14 messages go to the model as context, so a follow-up like "غير تليفونه" works without repeating the name.
+- The model has to answer in JSON. The module parses it, checks the required fields and asks for anything missing instead of creating half-empty records.
+- Every create or update shows a summary first (with totals for quotations) and waits for a yes.
+- Name lookup is fuzzy (`difflib`, threshold 0.62), so "مروان" still finds "Marwan Ashraf".
+- Quotation prices are pulled from the book or product record, so nobody has to type them.
+- If Groq rate-limits the request, the common flows (like building a quotation) are handled locally so the chat doesn't just break.
+- Arabic, English or a mix of both, typos included. Replies are formatted right-to-left.
 
-**Understands Arabic natively.**
-Write in Arabic, English, or mixed — the bot follows along. Typos and informal spelling are handled gracefully.
-
-**Remembers the conversation.**
-Context from the last 14 messages is always included. Say *"غير تليفونه"* after mentioning a name — the bot knows who you mean.
-
-**Never creates empty records.**
-All required fields are validated before execution. If something is missing, the bot asks — it won't create a blank quotation.
-
-**Confirms before acting.**
-Every create or update operation shows a confirmation summary with calculated totals. The user approves before anything is saved.
-
-**Fuzzy name matching.**
-Uses similarity scoring to find records even with partial or slightly different names. `"مروان"` matches `"Marwan Ashraf"`.
-
-**Auto-prices quotations.**
-For library books, price is pulled directly from the book record. No need to type the price manually.
-
-**Graceful API fallback.**
-If the Groq API hits a rate limit, the bot handles common flows locally without breaking.
-
----
-
-## Real Conversations
+## Example conversations
 
 ### Adding an author in one message
 ```
@@ -137,9 +112,7 @@ OdooBot:          تم التعديل ✅
                   📧 samer124@gmail.com
 ```
 
----
-
-## Capabilities
+## What it can do
 
 | Feature | Status |
 |---------|--------|
@@ -155,35 +128,31 @@ OdooBot:          تم التعديل ✅
 | Rate limit fallback (local handling) | ✅ |
 | RTL formatted chat responses | ✅ |
 
----
+## Tech details
 
-## Technical Overview
+| | |
+|---|---|
+| ERP | Odoo 16 Community |
+| Model | LLaMA 3.3 70B |
+| Inference | Groq Cloud |
+| Hook | `mail.bot` inheritance |
+| Context | last 14 messages |
+| Name matching | `difflib.SequenceMatcher` (score ≥ 0.62) |
+| Writes | Odoo ORM inside a savepoint |
+| Config | Settings > AI Bot (Groq), or `GROQ_API_KEY` |
 
-| Layer | Technology |
-|-------|-----------|
-| ERP Platform | Odoo 16 Community |
-| AI Model | LLaMA 3.3 70B |
-| Inference API | Groq Cloud — free tier |
-| Integration Point | `mail.bot` ORM override |
-| Context Window | Last 14 conversation messages |
-| Name Matching | `difflib.SequenceMatcher` (≥ 0.62 score) |
-| Action Execution | Direct Odoo ORM with savepoint |
-| Language Support | Arabic, English, mixed |
+The module only inherits `mail.bot`. No core files are touched, so uninstalling it leaves nothing behind.
 
-The module hooks into Odoo's `mail.bot` abstract model using standard inheritance — no core files are modified, and the module can be uninstalled cleanly.
+## Adding another module
 
----
+Supporting a new model means adding three things. First the action in the system prompt:
 
-## Extending to Any Module
-
-Adding support for a new Odoo module takes **3 steps**:
-
-**1. Add the action to the system prompt:**
 ```python
 {"action": "create_employee", "name": "", "job_title": "", "department": ""}
 ```
 
-**2. Register the handler:**
+Then the handler mapping:
+
 ```python
 handlers = {
     ...
@@ -191,7 +160,8 @@ handlers = {
 }
 ```
 
-**3. Write the handler:**
+And the handler itself:
+
 ```python
 def _exec_create_employee(self, data):
     employee = self.env['hr.employee'].sudo().create({
@@ -201,53 +171,43 @@ def _exec_create_employee(self, data):
     return f"✅ Employee added: {employee.name}"
 ```
 
-The AI generalizes automatically — no retraining, just configuration.
+The model picks the new action up from the prompt, there's nothing to retrain.
 
----
+## Requirements
+
+- Odoo 16 Community with `mail`, `sale_management` and `purchase`
+- A Groq API key (the free tier is enough for testing and internal use)
+- The author and book actions expect `library.author` and `library.book` from a library module, which is what I used for the demo. Quotations, purchase orders, customers and product search work on a standard Odoo install.
 
 ## Setup
 
-**1. Get a free Groq API key:**
-[console.groq.com](https://console.groq.com) → Create API Key
+1. Get a key from [console.groq.com](https://console.groq.com).
+2. Clone the module into your addons path:
+   ```bash
+   git clone https://github.com/Marwankhater/AI_bot_for_odoo16.git ai_bot_for_odoo16
+   ```
+3. Restart Odoo, update the apps list, search for "OdooBot AI" and install it.
+4. Go to Settings > General Settings > AI Bot (Groq) and paste the key. Setting `GROQ_API_KEY` in the server environment works too.
+5. Open Discuss and message OdooBot.
 
-**2. Add your key to the module:**
-Open `models/mail_bot.py` and replace:
-```python
-api_key = "add ur keyy here"
-```
-with your Groq API key.
+Without a key the bot behaves like the normal OdooBot.
 
-**3. Install the module:**
-Copy the folder to your Odoo addons path → Apps → Update Apps List → Install `ai_bot_gemini_backup`
+## Why Groq and LLaMA
 
-**4. Start chatting:**
-Open Discuss → OdooBot → and just talk.
+Every reply can end up as a database write, so the model has to stick to the JSON format. LLaMA 3.3 70B
+is reliable at that and handles Arabic well, and Groq is fast enough that the chat doesn't feel laggy.
 
----
+## Roadmap
 
-## What's Next
-
-- 🎙️ Voice input support
-- 📊 Smart reporting via chat
-- 🔔 Scheduled alerts and reminders
-- 🔌 HR, Inventory, and Accounting module support
-
----
-
-## Why Groq + LLaMA
-
-Groq provides hardware-accelerated inference that makes responses feel instant. LLaMA 3.3 70B has strong multilingual reasoning and follows structured JSON output reliably — critical for an application where every response triggers a real database action. The free tier handles internal business use comfortably.
-
----
+- Voice input
+- Reports through chat
+- Scheduled reminders
+- HR, Inventory and Accounting actions
 
 ## License
 
-LGPL-3 — consistent with Odoo Community modules.
+LGPL-3, same as Odoo Community.
 
 ---
 
-<div align="center">
-<i>Built to answer one question: what if your ERP could just listen?</i>
-<br/><br/>
-⭐ Star the repo if this helped you think differently about ERP usability.
-</div>
+Made by [Marwan Khater](https://www.linkedin.com/in/marwan-ashraf-811660219/) · [GitHub](https://github.com/Marwankhater)

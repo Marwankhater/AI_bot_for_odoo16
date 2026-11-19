@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import logging
 import requests
@@ -91,7 +92,7 @@ class MailBot(models.AbstractModel):
     _inherit = 'mail.bot'
 
     def _get_answer(self, record, message, values, command):
-        api_key = "add ur keyy here"
+        api_key = self._get_groq_api_key()
 
         if not api_key or not message:
             return super()._get_answer(record, message, values, command)
@@ -465,6 +466,13 @@ class MailBot(models.AbstractModel):
             return []
 
     # ── Groq API ──────────────────────────────────────────────────────────
+
+    def _get_groq_api_key(self):
+        # key from Settings first, then the GROQ_API_KEY env var
+        return (
+            self.env['ir.config_parameter'].sudo().get_param('ai_bot.groq_api_key')
+            or os.environ.get('GROQ_API_KEY')
+        )
 
     def _ai_call_groq(self, user_message, api_key, history=None):
         url = "https://api.groq.com/openai/v1/chat/completions"

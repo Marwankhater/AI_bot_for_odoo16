@@ -210,4 +210,4 @@ LGPL-3, same as Odoo Community.
 
 ---
 
-Made by [Marwan Khater](https://www.linkedin.com/in/marwan-ashraf-811660219/) · [GitHub](https://github.com/Marwankhater)
+Made by [Marwan Khater](https://www.linkedin.com/in/marwan-khater-811660219/) · [GitHub](https://github.com/Marwankhater)

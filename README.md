@@ -34,11 +34,11 @@ flowchart LR
     A["User message<br/>in Discuss"] --> B["mail.bot override"]
     B --> C["Groq · LLaMA 3.3 70B<br/>+ last 14 messages"]
     C --> D["JSON action"]
-    D --> E{"Required fields<br/>present?"}
-    E -- no --> F["Bot asks for<br/>what's missing"]
-    F --> A
-    E -- yes --> G["Summary with totals"]
-    G -- user confirms --> H["ORM write<br/>(savepoint)"]
+    D -- search --> S["Read with the<br/>user's rights"] --> I
+    D -- write --> E{"Required fields<br/>present?"}
+    E -- no --> F["Bot asks for<br/>what's missing"] --> A
+    E -- yes --> G["Summary in chat"]
+    G -- "user: نعم" --> H["Saved exactly as shown,<br/>as the user, in a savepoint"]
     H --> I["Reply in chat"]
 ```
 
@@ -46,7 +46,8 @@ The parts that took the most work:
 
 - The last 14 messages go to the model as context, so a follow-up like "غير تليفونه" works without repeating the name.
 - The model has to answer in JSON. The module parses it, checks the required fields and asks for anything missing instead of creating half-empty records.
-- Every create or update shows a summary first (with totals for quotations) and waits for a yes.
+- The model never writes anything. Every create or update is shown as a summary first (with totals for quotations). When the user answers yes, the module reads the data back from that summary and saves exactly that, so what was confirmed is what gets saved.
+- Everything runs as the user who wrote the message, with their own access rights. Someone who cannot create a quotation in the Sales app cannot create one by asking the bot.
 - Name lookup is fuzzy (`difflib`, threshold 0.62), so "مروان" still finds "Marwan Ashraf".
 - Quotation prices are pulled from the book or product record, so nobody has to type them.
 - If Groq rate-limits the request, the common flows (like building a quotation) are handled locally so the chat doesn't just break.
@@ -54,22 +55,20 @@ The parts that took the most work:
 
 ## Example conversations
 
-### Adding an author in one message
+### Adding an author
 ```
 Mitchell Admin:   ضيفلي مؤلف اسمه سامر سمير رقمه 055889
+OdooBot:          تأكيد العملية 🔍
+                  ➕ إضافة مؤلف جديد
+                  👤 الاسم: سامر سمير
+                  📞 التليفون: 055889
+                  تأكد وأكمل؟ (نعم / لا)
+
+Mitchell Admin:   نعم
 OdooBot:          تمام! المؤلف اتضاف ✅
-                  👤 Samir Samir
+                  👤 سامر سمير
                   📞 055889
                   📧 —
-```
-
-### Adding a book with full details
-```
-Mitchell Admin:   ضيف كتاب اسمه الإسكندراني للمؤلف سامر سمير كميته 200 سعر 1200
-OdooBot:          تمام! الكتاب اتضاف ✅
-                  📚 الإسكندراني
-                  👤 Samir Samir
-                  💰 1200 جنيه
 ```
 
 ### Creating a quotation with auto-pricing
@@ -122,7 +121,8 @@ OdooBot:          تم التعديل ✅
 | Create purchase orders | ✅ |
 | Add / search customers | ✅ |
 | Search products with stock & price | ✅ |
-| Confirmation flow before every write | ✅ |
+| Confirmation before every write, saved exactly as shown | ✅ |
+| Runs with the user's own access rights | ✅ |
 | Fuzzy Arabic/English name matching | ✅ |
 | Full conversation memory (14 messages) | ✅ |
 | Rate limit fallback (local handling) | ✅ |
@@ -138,7 +138,8 @@ OdooBot:          تم التعديل ✅
 | Hook | `mail.bot` inheritance |
 | Context | last 14 messages |
 | Name matching | `difflib.SequenceMatcher` (score ≥ 0.62) |
-| Writes | Odoo ORM inside a savepoint |
+| Writes | Odoo ORM as the current user, inside a savepoint |
+| Tests | 41 logic tests and 9 Odoo integration tests, run on every push |
 | Config | Settings > AI Bot (Groq), or `GROQ_API_KEY` |
 
 The module only inherits `mail.bot`. No core files are touched, so uninstalling it leaves nothing behind.
@@ -164,7 +165,7 @@ And the handler itself:
 
 ```python
 def _exec_create_employee(self, data):
-    employee = self.env['hr.employee'].sudo().create({
+    employee = self.env['hr.employee'].create({
         'name': data.get('name'),
         'job_title': data.get('job_title') or '',
     })
@@ -177,7 +178,7 @@ The model picks the new action up from the prompt, there's nothing to retrain.
 
 - Odoo 16 Community with `mail`, `sale_management` and `purchase`
 - A Groq API key (the free tier is enough for testing and internal use)
-- The author and book actions expect `library.author` and `library.book` from a library module, which is what I used for the demo. Quotations, purchase orders, customers and product search work on a standard Odoo install.
+- The author and book actions expect `library.author` and `library.book` from a library module, which is what I used for the demo. Quotations, purchase orders, customers and product search work on a standard Odoo install. Stock levels show in product search when the Inventory app is installed.
 
 ## Setup
 
@@ -191,6 +192,21 @@ The model picks the new action up from the prompt, there's nothing to retrain.
 5. Open Discuss and message OdooBot.
 
 Without a key the bot behaves like the normal OdooBot.
+
+## Tests
+
+```bash
+# The text logic: summaries, yes and no, required fields, name matching. No Odoo needed.
+cd tests_unit && pytest
+
+# Inside Odoo 16, with the model replaced by a stub, so no key or network is needed.
+odoo-bin -d test_db -i ai_bot_for_odoo16 --test-tags /ai_bot_for_odoo16 --stop-after-init
+```
+
+The Odoo tests check the things that matter most: nothing is created before a yes, a "no" cancels,
+a model reply asking to execute still produces a summary, names are saved as typed, and users
+without Sales or Contacts rights are refused. Both suites run on every push
+(`.github/workflows/tests.yml`).
 
 ## Why Groq and LLaMA
 

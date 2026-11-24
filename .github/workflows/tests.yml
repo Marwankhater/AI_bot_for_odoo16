@@ -1,0 +1,54 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  logic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install pytest
+      - run: pytest
+        working-directory: tests_unit
+
+  odoo:
+    runs-on: ubuntu-22.04
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_USER: odoo
+          POSTGRES_PASSWORD: odoo
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: addons/ai_bot_for_odoo16
+      - uses: actions/checkout@v4
+        with:
+          repository: odoo/odoo
+          ref: "16.0"
+          path: odoo
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: odoo/requirements.txt
+      - name: Install Odoo's Python requirements
+        run: |
+          grep -v -E "^(python-ldap|gevent|greenlet|psycopg2)" odoo/requirements.txt > req.txt
+          pip install -r req.txt psycopg2-binary "setuptools<70"
+      - name: Install the module and run its tests
+        run: |
+          python odoo/odoo-bin -d test_db --db_host localhost --db_user odoo --db_password odoo \
+            --addons-path=odoo/addons,odoo/odoo/addons,addons \
+            -i ai_bot_for_odoo16 --test-enable --test-tags /ai_bot_for_odoo16 \
+            --stop-after-init --log-level=test 2>&1 | tee odoo.log
+          grep -q " 0 failed, 0 error(s) of " odoo.log

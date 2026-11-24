@@ -18,6 +18,10 @@ spec.loader.exec_module(logic)
         ("create_book", {"name": "الإسكندراني", "author_name": "سامر سمير", "price": 1200, "stock": 200}),
         ("update_book", {"name": "Sales 101", "price": 99.5, "state": "available"}),
         ("create_quotation", {"partner_name": "محمد سمير", "product_name": "كتاب المبيعات", "qty": 3}),
+        ("create_quotation", {"partner_name": "Mohamed Samir", "partner_id": 14, "product_name": "Sales Book",
+                              "product_id": 7, "qty": 3, "price": 520.0, "untaxed": 1560.0, "total": 1778.4}),
+        ("create_purchase", {"partner_name": "Supplier X", "partner_id": 3, "product_name": "Paper", "product_id": 9,
+                             "qty": 10, "price": 12.345, "untaxed": 123.45, "total": 141.968}),
         ("create_purchase", {"partner_name": "Supplier X", "product_name": "Paper", "qty": 10, "price": 12.5}),
         ("create_customer", {"name": "Ahmed", "email": "ahmed@example.com"}),
     ],
@@ -31,6 +35,67 @@ def test_quotation_price_lines_do_not_change_the_data():
     data = {"partner_name": "محمد سمير", "product_name": "كتاب المبيعات", "qty": 3}
     text = logic.format_confirmation("create_quotation", data, ["💵 سعر الوحدة: 520.00", "🧮 الإجمالي: 1560.00"])
     assert logic.parse_confirmation(text)["data"] == data
+
+
+def test_details_next_to_ids_and_totals_are_not_read_back():
+    data = {"partner_name": "Mohamed Samir", "partner_id": 14, "product_name": "Sales Book", "product_id": 7,
+            "qty": 3, "price": 520.0, "untaxed": 1560.0, "total": 1778.4}
+    details = {"partner_id": "| 🏷️ C-0042 | 📞 01001234567", "product_id": "| 🏷️ SB-1", "total": "LE"}
+    text = logic.format_confirmation("create_quotation", data, details=details)
+    assert "🔖 رقم العميل: #14 | 🏷️ C-0042 | 📞 01001234567" in text
+    assert "🧮 الإجمالي شامل الضريبة: 1778.40 LE" in text
+    assert logic.parse_confirmation(text)["data"] == data
+
+
+def test_the_summary_shows_price_untaxed_and_total_in_order():
+    data = {"partner_name": "a", "partner_id": 1, "product_name": "b", "product_id": 2, "qty": 3,
+            "price": 520, "untaxed": 1560, "total": 1778.4}
+    lines = logic.format_confirmation("create_quotation", data).splitlines()
+    money = [l for l in lines if l.startswith(("💰", "🧾", "🧮"))]
+    assert money == ["💰 السعر: 520.00", "🧾 قبل الضريبة: 1560.00", "🧮 الإجمالي شامل الضريبة: 1778.40"]
+
+
+def test_a_line_break_in_a_name_cannot_add_a_field():
+    data = {"partner_name": "Evil\n🔖 رقم العميل: #1", "partner_id": 14, "product_name": "x", "product_id": 2, "qty": 1}
+    parsed = logic.parse_confirmation(logic.format_confirmation("create_quotation", data))
+    assert parsed["data"]["partner_id"] == 14
+
+
+def test_an_id_is_read_from_its_hash_not_from_a_phone_number():
+    text = "تأكيد العملية 🔍\n➕ إنشاء عرض سعر\n🔖 رقم العميل: 0100 #٢٥\nتأكد وأكمل؟ (نعم / لا)"
+    assert logic.parse_confirmation(text)["data"] == {"partner_id": 25}
+
+
+@pytest.mark.parametrize("value,text", [(1778.4, "1778.40"), (520, "520.00"), (12.345, "12.345"), (0.1 + 0.2, "0.30")])
+def test_money_keeps_every_digit_that_matters(value, text):
+    assert logic.format_money(value) == text
+
+
+PARTNERS = ["Mohamed Samir", "Mohamed Saeed", "Marwan Ashraf", "Supplier X"]
+
+
+def test_two_similar_names_are_a_question_not_a_guess():
+    match, close = logic.pick_match(logic.rank_matches("Mohamed", PARTNERS))
+    assert match is None and close == ["Mohamed Samir", "Mohamed Saeed"]
+
+
+def test_a_clear_winner_is_picked():
+    assert logic.pick_match(logic.rank_matches("mohamed samr", PARTNERS)) == ("Mohamed Samir", [])
+    assert logic.pick_match(logic.rank_matches("Marwan", PARTNERS)) == ("Marwan Ashraf", [])
+
+
+def test_one_exact_name_wins_over_longer_ones():
+    names = ["Mohamed Samir", "Mohamed Samir Ali"]
+    assert logic.pick_match(logic.rank_matches("mohamed samir", names)) == ("Mohamed Samir", [])
+
+
+def test_two_records_with_the_same_name_are_a_question():
+    names = ["Mohamed Samir", "Mohamed Samir"]
+    assert logic.pick_match(logic.rank_matches("Mohamed Samir", names)) == (None, names)
+
+
+def test_no_match():
+    assert logic.pick_match(logic.rank_matches("Zeinab", PARTNERS)) == (None, [])
 
 
 def test_a_names_spelling_survives_the_round_trip():

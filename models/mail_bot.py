@@ -8,6 +8,7 @@ from markupsafe import Markup, escape
 
 from odoo import models
 from odoo.exceptions import AccessError, UserError, ValidationError
+from odoo.tools import float_compare
 
 from .. import bot_logic as logic
 
@@ -17,6 +18,7 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 HISTORY_MESSAGES = 14
 LIBRARY_PRODUCT_CODE = "LIBRARY_QUOTATION_ITEM"
+ORDER_MODELS = {"create_quotation": "sale.order", "create_purchase": "purchase.order"}
 
 SYSTEM_PROMPT = """أنت مساعد شاطر مدمج في نظام Odoo. اسمك "Mario" 😄
 
@@ -44,10 +46,11 @@ SYSTEM_PROMPT = """أنت مساعد شاطر مدمج في نظام Odoo. اس�
 - update_author: name + واحدة على الأقل من (new_name, phone, email)
 - create_book: name + واحدة على الأقل من (author_name, price, stock)
 - update_book: name + واحدة على الأقل من التعديلات
-- create_quotation: partner_name + product_name + qty، والسعر بيتحسب لوحده
+- create_quotation: partner_name + product_name + qty، والسعر والضريبة بيتحسبوا لوحدهم
 - create_purchase: partner_name + product_name + qty + price
 3. لو حاجة إلزامية ناقصة → action=chat واسأل عنها
 4. البحث بيتنفذ على طول من غير تأكيد
+5. السيستم بيدور على العميل والمنتج بنفسه. لو سأل المستخدم يقصد مين من قايمة فيها أرقام (#)، والمستخدم اختار واحد، ابعت رقمه في partner_id أو product_id مع نفس العملية.
 
 الأوامر — رد بـ JSON بس:
 
@@ -207,17 +210,112 @@ class MailBot(models.AbstractModel):
     def _confirmation(self, operation, data):
         if operation not in logic.OPERATION_LABELS:
             return "مش عارف أعمل العملية دي."
+        # Totals and record ids in the summary come from Odoo, never from the model's reply.
+        data = {k: v for k, v in (data or {}).items() if k not in logic.COMPUTED_FIELDS}
+        if operation not in ORDER_MODELS:
+            data = {k: v for k, v in data.items() if k not in logic.ID_FIELDS}
         missing = logic.missing_data_message(operation, data)
         if missing:
             return missing
-        extra = []
+        if operation in ORDER_MODELS:
+            return self._order_confirmation(operation, data)
+        return logic.format_confirmation(operation, data)
+
+    def _order_confirmation(self, operation, data):
+        """Find the customer and product first, so the summary shows the records a yes will use."""
+        sale = operation == "create_quotation"
+        if not self.env[ORDER_MODELS[operation]].check_access_rights("create", raise_exception=False):
+            raise AccessError("no create access")
+        who = "العميل" if sale else "المورد"
+        partner, options = self._find("res.partner", data["partner_name"], data.get("partner_id"))
+        if not partner:
+            return self._not_found_reply(who, data["partner_name"], data.get("partner_id"), options)
+        line_name, price = None, None
+        product_domain = [("sale_ok" if sale else "purchase_ok", "=", True)]
+        product, options = self._find("product.product", data["product_name"], data.get("product_id"), product_domain)
+        if product:
+            line_name = product.name
+        elif sale and not options and not data.get("product_id") and "library.book" in self.env:
+            # A book from the library module is sold through one generic product, at the book's price.
+            book, options = self._find("library.book", data["product_name"])
+            library_product = self.env["product.product"].search([("default_code", "=", LIBRARY_PRODUCT_CODE)], limit=1)
+            if book and library_product:
+                product, line_name, price = library_product, book.name, book.price
+        if not product:
+            return self._not_found_reply("المنتج", data["product_name"], data.get("product_id"), options)
+        if not sale:
+            price = float(data["price"])
+        vals = self._order_vals(operation, partner, product, float(data["qty"]), line_name if sale else None, price)
+        return self._order_summary(operation, data, partner, product, line_name, self._order_preview(operation, vals))
+
+    def _order_summary(self, operation, data, partner, product, line_name, preview):
+        summary = {
+            "partner_name": partner.name,
+            "partner_id": partner.id,
+            "product_name": line_name or product.name,
+            "product_id": product.id,
+            "qty": data["qty"],
+            "price": preview.order_line[:1].price_unit,
+            "untaxed": preview.amount_untaxed,
+            "total": preview.amount_total,
+        }
+        details = {
+            "partner_id": self._record_details(partner),
+            "product_id": self._record_details(product),
+            "total": preview.currency_id.symbol or "",
+        }
+        return logic.format_confirmation(operation, summary, details=details)
+
+    def _order_vals(self, operation, partner, product, qty, line_name=None, price=None):
         if operation == "create_quotation":
-            item = self._quotation_item(data.get("product_name"))
-            if not item:
-                return f"مش لاقي المنتج \"{data.get('product_name')}\"."
-            qty = float(data["qty"])
-            extra = [f"💵 سعر الوحدة: {item['unit_price']:.2f}", f"🧮 الإجمالي: {item['unit_price'] * qty:.2f}"]
-        return logic.format_confirmation(operation, data, extra)
+            line = {"product_id": product.id, "product_uom_qty": qty}
+        else:
+            line = {"product_id": product.id, "product_qty": qty}
+        if line_name:
+            line["name"] = line_name
+        if price is not None:
+            line["price_unit"] = price
+        return {"partner_id": partner.id, "order_line": [(0, 0, line)]}
+
+    def _order_preview(self, operation, vals):
+        """The order as Odoo would compute it (pricelist, product taxes, fiscal position), unsaved."""
+        order = self.env[ORDER_MODELS[operation]].new(vals)
+        if operation == "create_purchase":
+            # Purchase lines get their taxes from the product onchange at create; run the same compute.
+            order.order_line._compute_tax_id()
+        return order
+
+    def _record_details(self, record):
+        """What tells two records with similar names apart: reference, company, phone."""
+        parts = []
+        if record._name == "res.partner":
+            phone = record.phone or record.mobile
+            parts = [
+                record.ref and f"🏷️ {record.ref}",
+                record.parent_id and f"🏢 {record.parent_id.name}",
+                phone and f"📞 {phone}",
+                not phone and record.email and f"📧 {record.email}",
+            ]
+        elif record._name == "product.product":
+            library = record.default_code == LIBRARY_PRODUCT_CODE
+            parts = ["📚 كتاب من المكتبة" if library else record.default_code and f"🏷️ {record.default_code}"]
+        parts = [p for p in parts if p]
+        return "| " + " | ".join(parts) if parts else ""
+
+    def _not_found_reply(self, who, name, record_id, options):
+        if record_id:
+            return f"{who} رقم #{record_id} مش موجود أو مش متاح ليك."
+        if not options:
+            hint = " لو عميل جديد، قولّي اسمه ورقم تليفونه أو إيميله وأضيفه الأول." if who == "العميل" else ""
+            return f"مش لاقي {who} \"{name}\".{hint}"
+        # Ids are offered only for records the order can take by id (not library books).
+        with_ids = options[0]._name in ("res.partner", "product.product")
+        lines = [f"لقيت أكتر من {who[2:]} قريب من \"{name}\"، تقصد مين؟"]
+        lines += [
+            f"• {r.name}" + (f" (#{r.id}) {self._record_details(r)}".rstrip() if with_ids else "") for r in options[:5]
+        ]
+        lines.append("ابعتلي الاسم كامل أو الرقم." if with_ids else "ابعتلي الاسم كامل.")
+        return "\n".join(lines)
 
     def _execute(self, pending):
         operation, data = pending["operation"], pending["data"]
@@ -231,40 +329,52 @@ class MailBot(models.AbstractModel):
             "update_author": self._update_author,
             "create_book": self._create_book,
             "update_book": self._update_book,
-            "create_quotation": self._create_quotation,
-            "create_purchase": self._create_purchase,
             "create_customer": self._create_customer,
         }
+        if operation in ORDER_MODELS:
+            return self._create_order(operation, data)
         return executors[operation](data)
 
     # Lookups -----------------------------------------------------------------------------
 
-    def _best_match(self, model, name, domain=None, threshold=0.62):
-        """The record whose name best matches `name`, among the ones this user can read."""
+    def _ranked(self, model, name, domain=None):
+        """[(score, record)] for the records this user can read whose name is close to `name`, best first."""
         if not name:
-            return None
+            return []
         Model = self.env[model]
-        exact = Model.search([*(domain or []), ("name", "=ilike", name.strip())], limit=1)
-        if exact:
-            return exact
+        exact = Model.search([*(domain or []), ("name", "=ilike", name.strip())], limit=10)
         candidates = Model.search([*(domain or []), ("name", "ilike", logic.simplify_for_lookup(name)[:3])], limit=200) \
             or Model.search(domain or [], limit=200)
-        scored = max(((logic.name_score(name, r.name or ""), r) for r in candidates), default=(0, None), key=lambda x: x[0])
-        return scored[1] if scored[0] >= threshold else None
+        return logic.rank_matches(name, exact | candidates, key=lambda r: r.name)
 
-    def _quotation_item(self, name):
-        product = self._best_match("product.product", name, [("sale_ok", "=", True)])
-        if product:
-            return {"display_name": product.name, "unit_price": product.lst_price, "sale_product": product}
-        if "library.book" not in self.env:
+    def _best_match(self, model, name, domain=None):
+        """The record whose name best matches `name`, among the ones this user can read."""
+        ranked = self._ranked(model, name, domain)
+        return ranked[0][1] if ranked else None
+
+    def _find(self, model, name, record_id=None, domain=None):
+        """(record, close_ones): the record the user means, or the close candidates to ask about.
+
+        An id (the user picked one from a list the bot showed) is used as is, after checking it.
+        """
+        if record_id:
+            return self._confirmed_record(model, record_id, domain), []
+        match, close = logic.pick_match(self._ranked(model, name, domain))
+        return match, close
+
+    def _confirmed_record(self, model, record_id, domain=None):
+        """The record with this id, if it still exists, is active, fits `domain` and the user can read it."""
+        try:
+            record = self.env[model].browse(int(record_id)).exists()
+        except (TypeError, ValueError):
             return None
-        book = self._best_match("library.book", name)
-        if not book:
+        if not record or ("active" in record._fields and not record.active):
             return None
-        product = self.env["product.product"].search([("default_code", "=", LIBRARY_PRODUCT_CODE)], limit=1)
-        if not product:
+        record.check_access_rights("read")
+        record.check_access_rule("read")
+        if domain and not record.filtered_domain(domain):
             return None
-        return {"display_name": book.name, "unit_price": book.price, "sale_product": product}
+        return record
 
     # Writes ------------------------------------------------------------------------------
 
@@ -311,41 +421,43 @@ class MailBot(models.AbstractModel):
         book.write(self._book_vals(data))
         return f"تم التعديل ✅\n📚 {book.name}\n👤 {book.author_id.name or '—'}\n💰 {book.price:.0f} جنيه"
 
-    def _create_quotation(self, data):
-        partner = self._best_match("res.partner", data["partner_name"])
-        if not partner:
-            return f"مش لاقي العميل \"{data['partner_name']}\"."
-        item = self._quotation_item(data["product_name"])
-        if not item:
-            return f"مش لاقي المنتج \"{data['product_name']}\"."
-        qty = float(data["qty"])
-        order = self.env["sale.order"].create({
-            "partner_id": partner.id,
-            "order_line": [(0, 0, {
-                "product_id": item["sale_product"].id,
-                "product_uom_qty": qty,
-                "price_unit": item["unit_price"],
-                "name": item["display_name"],
-            })],
-        })
+    def _create_order(self, operation, data):
+        """Save the order on the exact records, price and total the user confirmed."""
+        sale = operation == "create_quotation"
+        if not data.get("partner_id") or not data.get("product_id"):
+            return "الملخص ده مفيهوش رقم العميل والمنتج، ابعت الطلب تاني عشان أعملك ملخص جديد."
+        partner = self._confirmed_record("res.partner", data["partner_id"])
+        product = self._confirmed_record(
+            "product.product", data["product_id"], [("sale_ok" if sale else "purchase_ok", "=", True)]
+        )
+        if not partner or not product:
+            return "العميل أو المنتج اللي في الملخص مبقاش موجود أو متاح ليك، ومفيش حاجة اتحفظت. ابعت الطلب تاني."
+        line_name = data.get("product_name") if sale else None
+        vals = self._order_vals(operation, partner, product, float(data["qty"]), line_name, float(data.get("price") or 0.0))
+        preview = self._order_preview(operation, vals)
+        if not self._same_amount(preview, data.get("total")):
+            return "الإجمالي اتغير من ساعة الملخص، ومفيش حاجة اتحفظت. ده الملخص الجديد:\n" + self._order_summary(
+                operation, data, partner, product, data.get("product_name"), preview
+            )
+        order = self.env[ORDER_MODELS[operation]].create(vals)
+        if not self._same_amount(order, data.get("total")):
+            raise UserError(f"الإجمالي طلع {order.amount_total:.2f} مش {data.get('total') or 0:.2f} زي الملخص، فمحفظتش حاجة.")
+        currency = order.currency_id.symbol or ""
+        if sale:
+            return (
+                f"تمام! عرض السعر اتعمل ✅\n🧾 {order.name}\n👤 {partner.name}\n📦 {data['product_name']}\n"
+                f"🔢 الكمية: {float(data['qty']):g}\n💰 سعر الوحدة: {order.order_line[:1].price_unit:.2f}\n"
+                f"🧾 قبل الضريبة: {order.amount_untaxed:.2f}\n"
+                f"🧮 الإجمالي شامل الضريبة: {order.amount_total:.2f} {currency}".rstrip()
+            )
         return (
-            f"تمام! عرض السعر اتعمل ✅\n🧾 {order.name}\n👤 {partner.name}\n📦 {item['display_name']}\n"
-            f"🔢 الكمية: {qty:g}\n💵 سعر الوحدة: {item['unit_price']:.2f}\n"
-            f"🧮 الإجمالي: {order.amount_total:.2f} {order.currency_id.symbol or ''}".rstrip()
+            f"تمام! أمر الشراء اتعمل ✅\n🧾 {order.name}\n🏢 {partner.name}\n📦 {product.name}\n"
+            f"🧮 الإجمالي شامل الضريبة: {order.amount_total:.2f} {currency}".rstrip()
         )
 
-    def _create_purchase(self, data):
-        partner = self._best_match("res.partner", data["partner_name"])
-        if not partner:
-            return f"مش لاقي المورد \"{data['partner_name']}\"."
-        product = self._best_match("product.product", data["product_name"], [("purchase_ok", "=", True)])
-        if not product:
-            return f"مش لاقي المنتج \"{data['product_name']}\"."
-        order = self.env["purchase.order"].create({
-            "partner_id": partner.id,
-            "order_line": [(0, 0, {"product_id": product.id, "product_qty": float(data["qty"]), "price_unit": float(data["price"])})],
-        })
-        return f"تمام! أمر الشراء اتعمل ✅\n🧾 {order.name}\n🏢 {partner.name}\n📦 {product.name}"
+    def _same_amount(self, order, confirmed_total):
+        rounding = order.currency_id.rounding or 0.01
+        return float_compare(order.amount_total, float(confirmed_total or 0.0), precision_rounding=rounding) == 0
 
     def _create_customer(self, data):
         partner = self.env["res.partner"].create({
@@ -415,8 +527,10 @@ class MailBot(models.AbstractModel):
         product = self._name_in_text("product.product", user_text, [("sale_ok", "=", True)])
         if partner:
             data["partner_name"] = partner.name
+            data["partner_id"] = partner.id
         if product:
             data["product_name"] = product.name
+            data["product_id"] = product.id
         qty = logic.extract_quantity(user_text)
         if qty:
             data["qty"] = qty

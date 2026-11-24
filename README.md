@@ -37,7 +37,9 @@ flowchart LR
     D -- search --> S["Read with the<br/>user's rights"] --> I
     D -- write --> E{"Required fields<br/>present?"}
     E -- no --> F["Bot asks for<br/>what's missing"] --> A
-    E -- yes --> G["Summary in chat"]
+    E -- yes --> M{"One customer and<br/>product match?"}
+    M -- "several close" --> Q["Bot asks which one"] --> A
+    M -- yes --> G["Summary with the record ids<br/>and Odoo's totals"]
     G -- "user: نعم" --> H["Saved exactly as shown,<br/>as the user, in a savepoint"]
     H --> I["Reply in chat"]
 ```
@@ -46,10 +48,12 @@ The parts that took the most work:
 
 - The last 14 messages go to the model as context, so a follow-up like "غير تليفونه" works without repeating the name.
 - The model has to answer in JSON. The module parses it, checks the required fields and asks for anything missing instead of creating half-empty records.
-- The model never writes anything. Every create or update is shown as a summary first (with totals for quotations). When the user answers yes, the module reads the data back from that summary and saves exactly that, so what was confirmed is what gets saved.
+- The model never writes anything. Every create or update is shown as a summary first. When the user answers yes, the module reads the data back from that summary and saves exactly that, so what was confirmed is what gets saved.
+- For quotations and purchase orders the customer and product are looked up before the summary is built. The summary shows the record that was found, with its real name, its id and a phone or reference, and the yes saves the order on that id. If two records match about equally well (two "Mohamed ..." customers, say), the bot asks which one instead of guessing.
+- The price, the amount before tax and the total with tax in the summary are computed by Odoo itself (pricelist, product taxes, fiscal position) on an unsaved order. If the total would come out different at save time, nothing is saved and a fresh summary is shown.
 - Everything runs as the user who wrote the message, with their own access rights. Someone who cannot create a quotation in the Sales app cannot create one by asking the bot.
 - Name lookup is fuzzy (`difflib`, threshold 0.62), so "مروان" still finds "Marwan Ashraf".
-- Quotation prices are pulled from the book or product record, so nobody has to type them.
+- Quotation prices come from the customer's pricelist (or the book's price), so nobody has to type them.
 - If Groq rate-limits the request, the common flows (like building a quotation) are handled locally so the chat doesn't just break.
 - Arabic, English or a mix of both, typos included. Replies are formatted right-to-left.
 
@@ -82,29 +86,48 @@ OdooBot:          كام كمية؟
 Mitchell Admin:   3 كتب
 OdooBot:          لسه محتاج: اسم العميل
 
-Mitchell Admin:   العميل محمد سمير
+Mitchell Admin:   العميل محمد
+OdooBot:          لقيت أكتر من عميل قريب من "محمد"، تقصد مين؟
+                  • محمد سمير (#14) | 📞 01001234567
+                  • محمد سعيد (#15) | 📧 m.saeed@example.com
+                  ابعتلي الاسم كامل أو الرقم.
+
+Mitchell Admin:   محمد سمير
 OdooBot:          تأكيد العملية 🔍
                   ➕ إنشاء عرض سعر
                   👤 العميل: محمد سمير
+                  🔖 رقم العميل: #14 | 📞 01001234567
                   📦 المنتج: كتاب المبيعات
+                  🔖 رقم المنتج: #7
                   🔢 الكمية: 3
                   💰 السعر: 520.00
-                  🧮 الإجمالي: 1560.00
+                  🧾 قبل الضريبة: 1560.00
+                  🧮 الإجمالي شامل الضريبة: 1778.40 LE
                   تأكد وأكمل؟ (نعم / لا)
 
 Mitchell Admin:   نعم
 OdooBot:          تمام! عرض السعر اتعمل ✅
                   🧾 S00023
                   👤 محمد سمير
-                  📦 المبيعات
+                  📦 كتاب المبيعات
                   🔢 الكمية: 3
-                  💰 سعر الوحدة: 520.00 جنيه
-                  🧮 الإجمالي: 1778.40 LE
+                  💰 سعر الوحدة: 520.00
+                  🧾 قبل الضريبة: 1560.00
+                  🧮 الإجمالي شامل الضريبة: 1778.40 LE
 ```
+
+The total in the summary is the total of the saved quotation, tax included (14% here).
 
 ### Updating a record
 ```
 Mitchell Admin:   change samer's phone to 01099999999
+OdooBot:          تأكيد العملية 🔍
+                  ✏️ تعديل بيانات مؤلف
+                  👤 الاسم: samer
+                  📞 التليفون: 01099999999
+                  تأكد وأكمل؟ (نعم / لا)
+
+Mitchell Admin:   نعم
 OdooBot:          تم التعديل ✅
                   👤 samer
                   📞 01099999999
@@ -122,6 +145,8 @@ OdooBot:          تم التعديل ✅
 | Add / search customers | ✅ |
 | Search products with stock & price | ✅ |
 | Confirmation before every write, saved exactly as shown | ✅ |
+| Orders saved on the customer and product shown, at the total shown | ✅ |
+| Asks which one when two customers or products are close | ✅ |
 | Runs with the user's own access rights | ✅ |
 | Fuzzy Arabic/English name matching | ✅ |
 | Full conversation memory (14 messages) | ✅ |
@@ -139,7 +164,7 @@ OdooBot:          تم التعديل ✅
 | Context | last 14 messages |
 | Name matching | `difflib.SequenceMatcher` (score ≥ 0.62) |
 | Writes | Odoo ORM as the current user, inside a savepoint |
-| Tests | 41 logic tests and 9 Odoo integration tests, run on every push |
+| Tests | 56 logic tests and 19 Odoo integration tests, run on every push |
 | Config | Settings > AI Bot (Groq), or `GROQ_API_KEY` |
 
 The module only inherits `mail.bot`. No core files are touched, so uninstalling it leaves nothing behind.
@@ -204,8 +229,9 @@ odoo-bin -d test_db -i ai_bot_for_odoo16 --test-tags /ai_bot_for_odoo16 --stop-a
 ```
 
 The Odoo tests check the things that matter most: nothing is created before a yes, a "no" cancels,
-a model reply asking to execute still produces a summary, names are saved as typed, and users
-without Sales or Contacts rights are refused. Both suites run on every push
+a model reply asking to execute still produces a summary, names are saved as typed, two similar
+customers lead to a question, a confirmed quotation goes to the customer id that was shown, the
+total in the summary equals the saved order total, and users without Sales or Contacts rights are refused. Both suites run on every push
 (`.github/workflows/tests.yml`).
 
 ## Why Groq and LLaMA

@@ -3,6 +3,9 @@
 The confirmation summary is the contract between the bot and the user: whatever is written in
 it is exactly what gets saved when the user says yes. `format_confirmation` writes it and
 `parse_confirmation` reads it back, and the tests check that one undoes the other.
+
+For orders the summary carries the id of the customer and product that were matched, so a yes
+saves the order on exactly the records that were shown, and the totals Odoo computed for it.
 """
 
 import json
@@ -29,14 +32,22 @@ FIELD_LABELS = {
     "email": "📧 الإيميل",
     "author_name": "👤 المؤلف",
     "partner_name": "👤 العميل",
+    "partner_id": "🔖 رقم العميل",
     "product_name": "📦 المنتج",
+    "product_id": "🔖 رقم المنتج",
     "qty": "🔢 الكمية",
     "price": "💰 السعر",
+    "untaxed": "🧾 قبل الضريبة",
+    "total": "🧮 الإجمالي شامل الضريبة",
     "stock": "📦 المخزون",
     "state": "🔄 الحالة",
     "rating": "⭐ التقييم",
 }
-NUMERIC_FIELDS = {"qty", "price", "stock"}
+NUMERIC_FIELDS = {"qty", "price", "untaxed", "total", "stock"}
+MONEY_FIELDS = {"price", "untaxed", "total"}
+ID_FIELDS = {"partner_id", "product_id"}
+# Worked out by the system for the summary, never taken from the model.
+COMPUTED_FIELDS = {"untaxed", "total"}
 
 APPROVE_WORDS = {
     "نعم", "ايوه", "أيوه", "اه", "أه", "ok", "okay", "yes", "تمام", "تم", "يلا",
@@ -85,6 +96,33 @@ def name_score(lookup, candidate):
         shorter, longer = sorted((len(candidate), len(lookup)))
         return 0.9 + (shorter / max(longer, 1)) * 0.09
     return SequenceMatcher(None, lookup, candidate).ratio()
+
+
+MATCH_THRESHOLD = 0.62
+AMBIGUITY_MARGIN = 0.05
+
+
+def rank_matches(lookup, candidates, key=lambda c: c, threshold=MATCH_THRESHOLD):
+    """[(score, candidate)] for the candidates whose name scores at least `threshold`, best first."""
+    scored = ((name_score(lookup, key(c) or ""), c) for c in candidates)
+    return sorted((pair for pair in scored if pair[0] >= threshold), key=lambda pair: -pair[0])
+
+
+def pick_match(ranked, margin=AMBIGUITY_MARGIN):
+    """(match, close_ones) from `rank_matches` output.
+
+    One exact name wins. Otherwise the best one wins only if nothing else is within `margin`
+    of it; if several are, there is no match and the close ones are returned so the user can
+    be asked which one they mean. Nothing above the threshold gives (None, []).
+    """
+    if not ranked:
+        return None, []
+    exact = [c for score, c in ranked if score >= 1.0]
+    if exact:
+        return (exact[0], []) if len(exact) == 1 else (None, exact)
+    best = ranked[0][0]
+    close = [c for score, c in ranked if best - score <= margin]
+    return (close[0], []) if len(close) == 1 else (None, close)
 
 
 def extract_quantity(text):
@@ -190,13 +228,34 @@ def missing_data_message(operation, data):
 
 # The confirmation summary --------------------------------------------------------------------
 
-def format_confirmation(operation, data, extra_lines=()):
-    """The summary shown before any write. Only known fields with a value are listed."""
+def format_money(value):
+    """Two decimals, unless that would hide part of the amount (a currency with three, say)."""
+    value = float(value)
+    return f"{value:.2f}" if abs(value - round(value, 2)) < 1e-9 else repr(value)
+
+
+def _format_value(key, value):
+    if key in ID_FIELDS:
+        return f"#{int(value)}"
+    if key in MONEY_FIELDS:
+        return format_money(value)
+    # One field per line: a value with a line break in it could pass for another field.
+    return " ".join(str(value).splitlines())
+
+
+def format_confirmation(operation, data, extra_lines=(), details=None):
+    """The summary shown before any write. Only known fields with a value are listed.
+
+    `details` maps a field to text shown after its value (a phone number next to a customer id,
+    a currency after a total). It helps the user recognise the record and is not read back.
+    """
+    details = details or {}
     lines = ["تأكيد العملية 🔍", OPERATION_LABELS[operation], ""]
     for key, label in FIELD_LABELS.items():
         value = (data or {}).get(key)
         if value not in (None, "", 0):
-            lines.append(f"{label}: {value}")
+            extra = " ".join(str(details.get(key) or "").split())
+            lines.append(f"{label}: {_format_value(key, value)}" + (f" {extra}" if extra else ""))
     lines.extend(extra_lines)
     lines += ["", CONFIRM_FOOTER]
     return "\n".join(lines)
@@ -223,7 +282,11 @@ def parse_confirmation(text):
         field = by_field.get(key)
         if not field or not value:
             continue
-        if field in NUMERIC_FIELDS:
+        if field in ID_FIELDS:
+            number = re.search(r"#(\d+)", normalize_digits(value))
+            if number:
+                data[field] = int(number.group(1))
+        elif field in NUMERIC_FIELDS:
             number = re.search(r"[-+]?\d+(?:\.\d+)?", normalize_digits(value))
             if number:
                 raw = number.group(0)

@@ -1,6 +1,6 @@
 {
     'name': 'OdooBot AI - LLM Assistant (Discuss)',
-    'version': '16.0.1.1.0',
+    'version': '16.0.1.2.0',
     'category': 'Discuss',
     'summary': 'Turn OdooBot into an LLM agent that understands natural language and takes real actions in Odoo',
     'author': 'Marwan Khater',
